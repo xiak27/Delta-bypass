@@ -4,11 +4,12 @@ from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 import auth_client as AUTH
+import link_generator as LG
 from main import solve_chain
 
-app = FastAPI(title="Delta Bypass API")
+app = FastAPI(title="Delta Bypass API", description="Delta / Platoboost 自动求解 API")
 
-# 开启跨域支持
+# 允许跨域
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,18 +22,21 @@ app.add_middleware(
 def root():
     return {"status": "online", "message": "Delta Bypass API 运行正常"}
 
+# 1. 核心卡密绕过接口
 @app.get("/api/bypass")
-def bypass_api(url: str = Query(..., description="传入的目标链接或 Ticket")):
+def bypass_api(
+    url: str = Query(..., description="目标链接或 Ticket"),
+    max_rounds: int = Query(3, ge=1, le=12, description="最大求解轮数，默认 3")
+):
     try:
-        # 1. 解析传入的链接/Ticket
+        # 解析提取 Ticket
         ticket = AUTH.extract_ticket_from_arg(url)
         if not ticket:
-            raise HTTPException(status_code=400, detail="传入的链接或 Ticket 无效")
+            raise HTTPException(status_code=400, detail="无效的 URL 或 Ticket 格式")
 
-        # 2. 调用 main.py 中已有的 solve_chain 核心解题逻辑
-        key, timer = solve_chain(ticket, verbose=False)
+        # 调用核心逻辑
+        key, timer = solve_chain(ticket, verbose=False, max_rounds=max_rounds)
 
-        # 3. 返回卡密结果
         if key:
             return {
                 "status": "success",
@@ -40,13 +44,27 @@ def bypass_api(url: str = Query(..., description="传入的目标链接或 Ticke
                 "elapsed": round(timer.total(), 2) if timer else 0
             }
         else:
-            reason = getattr(timer, 'invalid_reason', None) or "未成功解析到卡密"
+            reason = getattr(timer, 'invalid_reason', None) or "未成功解析到卡密，可能链接已失效或触发限流"
             return {
                 "status": "error",
-                "message": reason
+                "message": reason,
+                "elapsed": round(timer.total(), 2) if timer else 0
             }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"服务器解析异常: {str(e)}")
+
+# 2. 生成测试链接接口（对应 README 的 --generate 功能）
+@app.get("/api/generate")
+def generate_links(count: int = Query(1, ge=1, le=10, description="生成链接数量")):
+    try:
+        urls = LG.batch_links(count)
+        return {
+            "status": "success",
+            "count": len(urls),
+            "urls": urls
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"生成测试链接失败: {str(e)}")
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
