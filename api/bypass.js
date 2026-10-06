@@ -1,67 +1,98 @@
 export default async function handler(req, res) {
-  // 1. 设置跨域头 (CORS)，允许任意网页或前端程序调用你的 API
+  // 设置 CORS 跨域头
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  // 2. 处理浏览器的 OPTIONS 预检请求
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
 
-  // 3. 提取请求参数 (支持 GET 链接传参 和 POST JSON 传参)
   const targetUrl = req.query.url || req.query.hwid || (req.body && (req.body.url || req.body.hwid));
 
   if (!targetUrl) {
     return res.status(400).json({
       status: 'error',
-      message: '缺少必要参数 url 或 hwid。调用示例：/api/bypass?url=https://...'
+      message: '请提供 url 参数，例如：/api/bypass?url=https://...'
     });
   }
 
   try {
-    // 4. 模拟标准浏览器发起请求
-    const response = await fetch(targetUrl, {
-      method: 'GET',
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/plain, */*'
-      }
-    });
+    let resultKey = null;
 
-    if (!response.ok) {
-      return res.status(response.status).json({
-        status: 'error',
-        message: `目标服务器响应异常: HTTP ${response.status}`
-      });
+    // 1. 针对 Platoboost / Delta 类型的链接 (包含 platorelay 或 platoboost)
+    if (targetUrl.includes('platoboost') || targetUrl.includes('platorelay')) {
+      resultKey = await bypassPlatoboost(targetUrl);
+    } else {
+      // 2. 普通链接的提取逻辑
+      resultKey = await generalBypass(targetUrl);
     }
 
-    const text = await response.text();
-    let result = text.trim();
-
-    // 5. 自动提取 Key / Token（优先尝试 JSON 解析，失败则使用正则匹配）
-    try {
-      const json = JSON.parse(text);
-      result = json.key || json.result || json.token || text;
-    } catch (e) {
-      const match = text.match(/(?:key|token|result)["']?\s*[:=]\s*["']?([a-zA-Z0-9_\-]+)["']?/i);
-      if (match && match[1]) {
-        result = match[1];
-      }
-    }
-
-    // 6. 返回提取结果
     return res.status(200).json({
       status: 'success',
       target: targetUrl,
-      result: result,
+      result: resultKey,
       timestamp: new Date().toISOString()
     });
 
   } catch (err) {
     return res.status(500).json({
       status: 'error',
-      message: err.message || '网络请求处理失败'
+      message: err.message || '绕过解析失败'
     });
+  }
+}
+
+// 专门解析 Platoboost 接口逻辑
+async function bypassPlatoboost(urlStr) {
+  const u = new URL(urlStr);
+  const dParam = u.searchParams.get('d') || u.searchParams.get('id');
+
+  if (!dParam) {
+    throw new Error('链接缺少必要的 d 或 id 参数');
+  }
+
+  // 直接绕过前端 HTML，请求 Platoboost 后台 API
+  const apiUrl = `https://api.platoboost.com/v1/sessions/auth/plan?id=${encodeURIComponent(dParam)}`;
+  
+  const response = await fetch(apiUrl, {
+    method: 'GET',
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      'Accept': 'application/json, text/plain, */*',
+      'Origin': 'https://auth.platorelay.com',
+      'Referer': urlStr
+    }
+  });
+
+  const text = await response.text();
+  try {
+    const json = JSON.parse(text);
+    if (json.key) return json.key;
+    if (json.data && json.data.key) return json.data.key;
+    if (json.redirect) return json.redirect;
+    return json;
+  } catch (e) {
+    // 正则二次提取
+    const match = text.match(/(?:key|token)["']?\s*[:=]\s*["']?([a-zA-Z0-9_\-]+)["']?/i);
+    if (match && match[1]) return match[1];
+    throw new Error('未能从 Platoboost API 获取到有效的 Key');
+  }
+}
+
+// 普通链接逻辑
+async function generalBypass(urlStr) {
+  const response = await fetch(urlStr, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+    }
+  });
+  const text = await response.text();
+  try {
+    const json = JSON.parse(text);
+    return json.key || json.result || json.token || text;
+  } catch (e) {
+    const match = text.match(/(?:key|token|result)["']?\s*[:=]\s*["']?([a-zA-Z0-9_\-]+)["']?/i);
+    return match ? match[1] : text.trim();
   }
 }
